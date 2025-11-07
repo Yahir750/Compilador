@@ -50,7 +50,7 @@ class Parser:
         name_tok = self.expect("IDENT", "nombre de clase")
         lbrace = self.expect("LBRACE", "'{'")
 
-        methods = []
+        methods: List[MethodDecl] = []
         while self.peek().kind not in {"RBRACE", "EOF"}:
             methods.append(self.method_decl())
 
@@ -63,10 +63,11 @@ class Parser:
         )
 
     def method_decl(self) -> MethodDecl:
-        mods = []
-        # Aceptar public opcional
+        mods: List[str] = []
+        # Aceptar 'public' opcional
         if self.match("PUBLIC"):
             mods.append("public")
+        # Aceptar 'static' opcional (en v1 asumimos métodos estáticos)
         if self.match("STATIC"):
             mods.append("static")
 
@@ -75,7 +76,7 @@ class Parser:
 
         # Argumentos del método
         self.expect("LPAREN", "'('")
-        params = []
+        params: List[Param] = []
         if self.peek().kind != "RPAREN":
             params.append(self.param())
             while self.match("COMMA"):
@@ -105,12 +106,13 @@ class Parser:
                 "INT_T": "int", "DOUBLE_T": "double", "BOOLEAN_T": "boolean",
                 "STRING_T": "String", "VOID": "void"
             }
+            base = mapping[t.kind]
             # Soporte para arreglos tipo String[] o int[]
             if self.peek().kind == "LBRACK":
                 self.i += 1
                 self.expect("RBRACK", "']'")
-                return TypeRef(mapping[t.kind] + "[]")
-            return TypeRef(mapping[t.kind])
+                return TypeRef(base + "[]")
+            return TypeRef(base)
 
         self.diags.append(Diagnostic(
             "error", "parser", "Tipo esperado",
@@ -121,16 +123,21 @@ class Parser:
     # ---------- Bloques y sentencias ----------
     def block(self) -> Block:
         lbrace = self.expect("LBRACE", "'{'")
-        stmts = []
+        stmts: List[Stmt] = []
         while self.peek().kind not in {"RBRACE", "EOF"}:
-            stmts.append(self.stmt())
+            s = self.stmt()
+            # Si var_decl devolvió lista (múltiples declaraciones), expandimos
+            if isinstance(s, list):
+                stmts.extend(s)  # cada VarDecl es un Stmt
+            else:
+                stmts.append(s)
         rbrace = self.expect("RBRACE", "'}'")
         return Block(tuple(stmts), Span(lbrace.line, lbrace.col, rbrace.end_line, rbrace.end_col))
 
-    def stmt(self) -> Stmt:
+    def stmt(self) -> Stmt | List[Stmt]:
         k = self.peek().kind
         if k in {"INT_T", "DOUBLE_T", "BOOLEAN_T", "STRING_T"}:
-            return self.var_decl()
+            return self.var_decl()  # puede devolver list
         if k == "IF":
             return self.if_stmt()
         if k == "WHILE":
@@ -146,7 +153,7 @@ class Parser:
         self.expect("SEMI", "';'")
         return ExprStmt(e, e.span)
 
-    def var_decl(self) -> List[VarDecl]:
+    def var_decl(self) -> List[VarDecl] | VarDecl:
         """Soporta múltiples declaraciones en una sola línea: int a=1, b=2;"""
         t = self.type_ref()
         decls: List[VarDecl] = []
@@ -190,15 +197,19 @@ class Parser:
         init: List[Stmt] = []
         if self.peek().kind != "SEMI":
             if self.peek().kind in {"INT_T", "DOUBLE_T", "BOOLEAN_T", "STRING_T"}:
-                init.append(self.var_decl_no_semi())
+                # una sola var-decl (sin ';' aquí)
+                init_decl = self.var_decl_no_semi()
+                init.append(init_decl)
             else:
                 e = self.expr()
                 init.append(ExprStmt(e, e.span))
         self.expect("SEMI", "';'")
+
         cond = None
         if self.peek().kind != "SEMI":
             cond = self.expr()
         self.expect("SEMI", "';'")
+
         step: List[Expr] = []
         if self.peek().kind != "RPAREN":
             step.append(self.expr())

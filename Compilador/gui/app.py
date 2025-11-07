@@ -2,22 +2,22 @@ from __future__ import annotations
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import List, Tuple
+from typing import List
 import subprocess
 import tempfile
 import os
+import re
 
+# Importar componentes del compilador
 from compiler import lexer, parser, semantics, ir, optimizer, codegen_java, diagnostics
 from compiler.formatter_java import format_java
 
-APP_TITLE = "JavaToJavaCompiler GUI (v2) — Ejecutable"
+APP_TITLE = "JavaToJavaCompiler GUI (v3)"
 
 # ============================================================
 # Helpers visuales
 # ============================================================
 def _text_goto(text: tk.Text, line: int, col: int) -> None:
-    # Tk Text indices are 1-based for lines, 0-based for columns in index string,
-    # pero el usuario suele dar columnas 1-based, así que restamos 1 con seguridad.
     col_index = max(col - 1, 0)
     text.mark_set("insert", f"{line}.{col_index}")
     text.see(f"{line}.0")
@@ -47,8 +47,6 @@ def _set_theme(root: tk.Tk, dark: bool):
     root.configure(bg=panel_bg)
     style.configure("TFrame", background=panel_bg)
     style.configure("TLabel", background=panel_bg, foreground=fg)
-    # Notar: ttk.Button no siempre respeta background en todos los sistemas,
-    # pero dejamos la configuración para aquellos que sí lo acepten.
     style.configure("TButton", foreground="#ffffff", relief="flat", padding=6)
     style.map("TButton", background=[("active", "#1177bb")])
 
@@ -56,14 +54,12 @@ def _set_theme(root: tk.Tk, dark: bool):
         _apply_widget_colors(w, bg, fg, panel_bg)
 
 def _apply_widget_colors(widget, bg, fg, panel_bg):
-    # Aplicar colores a widgets tkinter nativos, y propagar recursivamente.
     try:
         if isinstance(widget, tk.Text):
             widget.configure(bg=bg, fg=fg, insertbackground=fg, highlightbackground=panel_bg)
         elif isinstance(widget, tk.Listbox):
             widget.configure(bg="#fafafa", fg="#000000")
     except Exception:
-        # no nos detenemos por widgets que no acepten ciertas opciones
         pass
 
     for child in widget.winfo_children():
@@ -142,7 +138,7 @@ class App:
         outer = ttk.Frame(root, padding=8)
         outer.pack(fill="both", expand=True)
 
-        # Barra superior de herramientas
+        # Barra superior
         toolbar = ttk.Frame(outer)
         toolbar.pack(fill="x", pady=(0, 6))
 
@@ -162,7 +158,7 @@ class App:
 
         ttk.Checkbutton(toolbar, text="Modo oscuro", variable=self.dark_mode, command=self._apply_theme).pack(side="left")
 
-        # Área central (editor + salida)
+        # Área central
         middle = ttk.Panedwindow(outer, orient="horizontal")
         middle.pack(fill="both", expand=True, pady=6)
 
@@ -176,7 +172,7 @@ class App:
         self.output.pack(fill="both", expand=True)
         middle.add(right_frame, weight=3)
 
-        # Panel inferior (diagnósticos + consola)
+        # Inferior
         bottom = ttk.Frame(outer)
         bottom.pack(fill="both", expand=False, pady=(6, 0))
         ttk.Label(bottom, text="Diagnósticos / Consola:").pack(anchor="w")
@@ -185,10 +181,10 @@ class App:
         self.diag_list.pack(fill="x", expand=False)
         self.diag_list.bind("<<ListboxSelect>>", self._jump_to_diag)
 
-        # Texto inicial
+        # Ejemplo inicial
         self.editor.insert(
             "1.0",
-            "class Main {\n"
+            "public class Hola {\n"
             "    public static void main(String[] args) {\n"
             "        System.out.println(\"Hola mundo desde Java!\");\n"
             "    }\n"
@@ -209,11 +205,10 @@ class App:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     code = f.read()
+                self.editor.delete("1.0", "end")
+                self.editor.insert("1.0", code)
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
-                return
-            self.editor.delete("1.0", "end")
-            self.editor.insert("1.0", code)
 
     def _save_output(self):
         out = self.output.get("1.0", "end-1c")
@@ -225,58 +220,36 @@ class App:
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(out)
+                messagebox.showinfo("Guardar", f"Guardado en {path}")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo guardar el archivo:\n{e}")
-                return
-            messagebox.showinfo("Guardar", f"Guardado en {path}")
 
     def _compile(self):
         src = self.editor.get("1.0", "end-1c")
         mode = self.view_mode.get()
         res = _compile_pipeline(src, opt_level=self.opt_level.get(), mode=mode)
 
-        # limpiar lista de diagnósticos
         self.diag_list.delete(0, "end")
-
-        # preparar output
         self.output.config(state="normal")
         self.output.delete("1.0", "end")
 
         if mode == "default":
             self.output.insert("1.0", res["javaCode"])
         elif mode == "ast":
-            try:
-                self.output.insert("1.0", json.dumps(res["ast"], ensure_ascii=False, indent=2, default=str))
-            except Exception:
-                self.output.insert("1.0", str(res["ast"]))
+            self.output.insert("1.0", json.dumps(res["ast"], ensure_ascii=False, indent=2, default=str))
         else:
-            try:
-                self.output.insert("1.0", json.dumps(res["ir"], ensure_ascii=False, indent=2, default=str))
-            except Exception:
-                self.output.insert("1.0", str(res["ir"]))
+            self.output.insert("1.0", json.dumps(res["ir"], ensure_ascii=False, indent=2, default=str))
 
-        # insertar errors y warnings en la lista (con color)
         for d in res["errors"]:
-            text = f"[{d.get('stage','?')}] {d.get('message','')} (L{d.get('line',0)},C{d.get('col',0)})"
-            self.diag_list.insert("end", text)
-            # conseguir índice del último elemento y aplicar color
-            idx = self.diag_list.size() - 1
-            try:
-                # itemconfig acepta 'foreground' en muchas plataformas; si falla, lo ignoramos.
-                self.diag_list.itemconfig(idx, foreground="#d32f2f")
-            except Exception:
-                pass
+            msg = f"[{d.get('stage')}] {d.get('message')} (L{d.get('line')},C{d.get('col')})"
+            self.diag_list.insert("end", msg)
+            self.diag_list.itemconfig("end", foreground="#d32f2f")
 
         for d in res["warnings"]:
-            text = f"[{d.get('stage','?')}] {d.get('message','')} (L{d.get('line',0)},C{d.get('col',0)})"
-            self.diag_list.insert("end", text)
-            idx = self.diag_list.size() - 1
-            try:
-                self.diag_list.itemconfig(idx, foreground="#f57c00")
-            except Exception:
-                pass
+            msg = f"[{d.get('stage')}] {d.get('message')} (L{d.get('line')},C{d.get('col')})"
+            self.diag_list.insert("end", msg)
+            self.diag_list.itemconfig("end", foreground="#f57c00")
 
-        # dejar output en modo readonly para evitar ediciones accidentales
         self.output.config(state="disabled")
 
     def _jump_to_diag(self, event=None):
@@ -290,11 +263,10 @@ class App:
             _highlight_line(self.editor, line)
             _text_goto(self.editor, line, col)
         except Exception:
-            # no hacemos nada si no se puede parsear la posición
             pass
 
     # =====================================================
-    # Nueva función: Ejecutar programa Java real
+    # Nueva función: ejecutar cualquier clase Java
     # =====================================================
     def _run_java(self):
         src = self.editor.get("1.0", "end-1c")
@@ -305,19 +277,20 @@ class App:
             return
 
         java_code = res["javaCode"]
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            src_path = os.path.join(tmpdir, "Main.java")
+            match = re.search(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)", java_code)
+            class_name = match.group(1) if match else "Main"
+            src_path = os.path.join(tmpdir, f"{class_name}.java")
+
             with open(src_path, "w", encoding="utf-8") as f:
                 f.write(java_code)
 
-            # Compilar con javac
+            # Compilar
             try:
                 proc_compile = subprocess.run(["javac", src_path], capture_output=True, text=True)
             except FileNotFoundError:
-                messagebox.showerror("Error", "No se encontró 'javac'. Asegúrate de tener JDK instalado y 'javac' en el PATH.")
-                return
-            except Exception as e:
-                messagebox.showerror("Error", f"Error al ejecutar 'javac':\n{e}")
+                messagebox.showerror("Error", "No se encontró 'javac'. Asegúrate de tener el JDK en el PATH.")
                 return
 
             self.output.config(state="normal")
@@ -330,24 +303,17 @@ class App:
 
             # Ejecutar
             try:
-                proc_run = subprocess.run(["java", "-cp", tmpdir, "Main"], capture_output=True, text=True)
+                proc_run = subprocess.run(["java", "-cp", tmpdir, class_name], capture_output=True, text=True)
             except FileNotFoundError:
-                messagebox.showerror("Error", "No se encontró 'java'. Asegúrate de tener JRE/JDK instalado y 'java' en el PATH.")
-                self.output.config(state="disabled")
-                return
-            except Exception as e:
-                self.output.insert("1.0", f"Error al ejecutar 'java':\n{e}")
-                self.output.config(state="disabled")
+                messagebox.showerror("Error", "No se encontró 'java'. Asegúrate de tener el JRE/JDK en el PATH.")
                 return
 
             if proc_run.returncode == 0:
-                out_text = proc_run.stdout or "(sin salida)"
-                self.output.insert("1.0", f"Salida del programa:\n{out_text}")
+                out_text = proc_run.stdout.strip() or "(sin salida)"
+                self.output.insert("1.0", f"Salida del programa:\n{out_text}\n")
             else:
-                # mostrar stderr y stdout para diagnóstico
-                stderr = proc_run.stderr or ""
-                stdout = proc_run.stdout or ""
-                self.output.insert("1.0", f"Error en ejecución:\n{stderr}\n{stdout}")
+                err_text = proc_run.stderr.strip()
+                self.output.insert("1.0", f"Error en ejecución:\n{err_text}\n")
 
             self.output.config(state="disabled")
 

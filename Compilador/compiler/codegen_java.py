@@ -1,23 +1,22 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple, Union
-
 from compiler.diagnostics import Diagnostic
 from compiler.ast_nodes import (
     CompilationUnit, ClassDecl, MethodDecl, Block, VarDecl, ExprStmt, If, While, For,
     Assign, Binary, Unary, Call, Select, Ident, Literal as LiteralExpr, Expr, Stmt,
     TypeRef, Param
 )
-from compiler.ir import IRProgram  # solo para el type hint del modo "ir"
+from compiler.ir import IRProgram
 
 # -------------------------------------------------
-# Utilidades de escritura con sangrías
+# Utilidad para escritura con sangrías
 # -------------------------------------------------
 @dataclass
 class _Out:
     lines: List[str]
     indent: int = 0
-    indent_str: str = "    "  # 4 espacios
+    indent_str: str = "    "
 
     def writeln(self, s: str = "") -> None:
         if s:
@@ -25,19 +24,12 @@ class _Out:
         else:
             self.lines.append("")
 
-    def write(self, s: str) -> None:
-        if s:
-            if self.lines and self.lines[-1] and not self.lines[-1].endswith("\n"):
-                # agrega al final de la línea actual
-                self.lines[-1] = f"{self.lines[-1]}{s}"
-            else:
-                self.lines.append(f"{self.indent_str * self.indent}{s}")
-
     def join(self) -> str:
         return "\n".join(self.lines)
 
+
 # -------------------------------------------------
-# Emisor principal (AST -> Java)
+# Emisor principal (AST → Java)
 # -------------------------------------------------
 class _EmitJavaAST:
     def __init__(self):
@@ -54,7 +46,7 @@ class _EmitJavaAST:
         return t.kind
 
     def _emit_class(self, c: ClassDecl) -> None:
-        self.out.writeln(f"class {c.name} {{")
+        self.out.writeln(f"public class {c.name} {{")
         self.out.indent += 1
         for m in c.methods:
             self._emit_method(m)
@@ -66,7 +58,7 @@ class _EmitJavaAST:
         mods = " ".join(m.modifiers) + (" " if m.modifiers else "")
         ret = self._type_to_java(m.return_type)
         params = ", ".join(f"{self._type_to_java(p.type)} {p.name}" for p in m.params)
-        self.out.writeln(f"{mods}{ret} {m.name}({params}) " + "{")
+        self.out.writeln(f"{mods}{ret} {m.name}({params}) {{")
         self.out.indent += 1
         self._emit_block(m.body, omit_braces=True)
         self.out.indent -= 1
@@ -97,12 +89,11 @@ class _EmitJavaAST:
             self.out.writeln(self._expr(s.expr) + ";")
             return
         if isinstance(s, If):
-            self.out.writeln(f"if ({self._expr(s.cond)}) " + "{")
+            self.out.writeln(f"if ({self._expr(s.cond)}) {{")
             self.out.indent += 1
             self._emit_stmt(s.then_branch)
             self.out.indent -= 1
             if s.else_branch:
-                # else en misma línea estilo K&R
                 self.out.writeln("} else {")
                 self.out.indent += 1
                 self._emit_stmt(s.else_branch)
@@ -112,7 +103,7 @@ class _EmitJavaAST:
                 self.out.writeln("}")
             return
         if isinstance(s, While):
-            self.out.writeln(f"while ({self._expr(s.cond)}) " + "{")
+            self.out.writeln(f"while ({self._expr(s.cond)}) {{")
             self.out.indent += 1
             self._emit_stmt(s.body)
             self.out.indent -= 1
@@ -122,20 +113,15 @@ class _EmitJavaAST:
             init_str = self._for_init_str(s.init)
             cond_str = self._expr(s.cond) if s.cond is not None else ""
             step_str = ", ".join(self._expr(e) for e in s.step)
-            self.out.writeln(f"for ({init_str}; {cond_str}; {step_str}) " + "{")
+            self.out.writeln(f"for ({init_str}; {cond_str}; {step_str}) {{")
             self.out.indent += 1
             self._emit_stmt(s.body)
             self.out.indent -= 1
             self.out.writeln("}")
             return
-        # fallback: bloque con comentario si algo no reconocido
-        self.out.writeln("{ /* unsupported statement in v1 */ }")
+        self.out.writeln("{ /* unsupported statement */ }")
 
     def _for_init_str(self, inits: tuple[Stmt, ...]) -> str:
-        """
-        v1: soportamos una sola declaración o una sola expresión en init.
-        Si hay múltiples, las unimos por coma cuando sean ExprStmt; si es VarDecl, asumimos una.
-        """
         if not inits:
             return ""
         if len(inits) == 1:
@@ -147,29 +133,20 @@ class _EmitJavaAST:
                 return decl
             if isinstance(s, ExprStmt):
                 return self._expr(s.expr)
-            # como fallback, imprime un comentario (no rompe compilación pero no hace nada útil)
-            return "/* unsupported for-init */"
-        # múltiples
-        parts: List[str] = []
-        for s in inits:
-            if isinstance(s, ExprStmt):
-                parts.append(self._expr(s.expr))
-            else:
-                parts.append("/* unsupported */")
-        return ", ".join(parts)
+        return ", ".join(
+            self._expr(s.expr) if isinstance(s, ExprStmt) else "/* unsupported */"
+            for s in inits
+        )
 
     # ---------- Expresiones ----------
     def _expr(self, e: Expr) -> str:
         if isinstance(e, LiteralExpr):
-            # String ya viene con comillas, boolean numéricos los convertimos a literales Java
             if e.type.kind == "boolean":
                 return "true" if bool(e.value) else "false"
             if e.type.kind == "String":
-                return str(e.value)  # incluye comillas
+                return str(e.value)
             if e.type.kind == "double":
-                # Representación estable para floats
                 return repr(float(e.value))
-            # int por defecto
             return str(int(e.value))
 
         if isinstance(e, Ident):
@@ -179,13 +156,13 @@ class _EmitJavaAST:
             return f"{self._expr(e.target)} = {self._expr(e.value)}"
 
         if isinstance(e, Unary):
-            # Paréntesis para preservar agrupación si es necesario
-            return f"{e.op}{self._paren_if_needed(e.operand)}"
+            return f"{e.op.strip()}{self._paren_if_needed(e.operand)}"
 
         if isinstance(e, Binary):
             left = self._paren_if_needed(e.left)
             right = self._paren_if_needed(e.right)
-            return f"{left} {self._binop_to_java(e.op)} {right}"
+            op = self._binop_to_java(e.op)
+            return f"{left} {op} {right}"
 
         if isinstance(e, Select):
             return f"{self._expr(e.receiver)}.{e.name}"
@@ -198,30 +175,47 @@ class _EmitJavaAST:
         return "/* unsupported expr */"
 
     def _binop_to_java(self, op: str) -> str:
-        # En nuestro AST guardamos el lexema de operador directamente (p.ej. "+", "==")
-        return op
+        """Corrige operadores binarios con o sin espacios (p. ej. '! =', '= =', '< =', '> =')."""
+        clean = op.strip().replace(" ", "")
+
+        # Normaliza casos comunes del lexer que pueden venir separados
+        if clean in {"= =", "=="}:
+            return "=="
+        if clean in {"! =", "!="}:
+            return "!="
+        if clean in {"< =", "<="}:
+            return "<="
+        if clean in {"> =", ">="}:
+            return ">="
+        if clean in {"& &", "&&"}:
+            return "&&"
+        if clean in {"| |", "||"}:
+            return "||"
+
+        # Otros operadores simples
+        if clean in {"+", "-", "*", "/", "%", "<", ">", "="}:
+            return clean
+
+        return clean
 
     def _paren_if_needed(self, e: Expr) -> str:
-        """Envuelve en paréntesis para mantener precedencia básica en pretty-print."""
         if isinstance(e, (LiteralExpr, Ident, Select, Call)):
             return self._expr(e)
-        # Para operaciones compuestas, rodear
         return f"({self._expr(e)})"
 
+
 # -------------------------------------------------
-# Emisor desde IR (placeholder simple)
+# Emisor desde IR (placeholder)
 # -------------------------------------------------
 class _EmitJavaIR:
     def __init__(self):
         self.diags: List[Diagnostic] = []
 
     def emit(self, prog: IRProgram) -> Tuple[str, List[Diagnostic]]:
-        # Placeholder que devuelve un archivo Java válido con comentarios del IR,
-        # pero no recompone control flow (eso se puede implementar en una fase futura).
-        # Nota: El orquestador usa `from_stage="ast"` por defecto, así que esto es opcional en v1.
-        lines: List[str] = []
-        lines.append("/* codegen from IR no implementado en v1: emitiendo comentarios del IR */")
-        lines.append("class Main {")
+        lines: List[str] = [
+            "/* codegen from IR not implemented yet */",
+            "class Main {",
+        ]
         for fn in prog.funcs:
             lines.append(f"    static void {fn.name}() {{")
             for bb in fn.blocks:
@@ -230,22 +224,23 @@ class _EmitJavaIR:
                     lines.append(f"        //   {ins}")
             lines.append("    }")
         lines.append("}")
-        self.diags.append(Diagnostic(
-            severity="info", stage="codegen",
-            message="Generación desde IR no implementada en v1; se emitieron comentarios.",
-            line=0, col=0, end_line=0, end_col=0, code="CODEGEN_IR_PLACEHOLDER"
-        ))
+        self.diags.append(
+            Diagnostic(
+                severity="info",
+                stage="codegen",
+                message="IR codegen not implemented; emitted comments only.",
+                line=0, col=0, end_line=0, end_col=0,
+                code="CODEGEN_IR_PLACEHOLDER",
+            )
+        )
         return "\n".join(lines), self.diags
+
 
 # -------------------------------------------------
 # API pública
 # -------------------------------------------------
 def emit(node: Union[CompilationUnit, IRProgram], from_stage: str = "ast") -> Tuple[str, List[Diagnostic]]:
-    """
-    Genera Java (texto) desde AST (v1) o IR (placeholder).
-    Retorna (java_src, diagnostics).
-    """
+    """Genera Java desde AST o IR."""
     if from_stage == "ir":
-        return _EmitJavaIR().emit(node)  # type: ignore[arg-type]
-    # por defecto, desde AST
-    return _EmitJavaAST().emit(node)     # type: ignore[arg-type]
+        return _EmitJavaIR().emit(node)
+    return _EmitJavaAST().emit(node)
