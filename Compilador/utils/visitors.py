@@ -1,0 +1,1 @@
+"""Visitantes para AST/IR (stub)."""

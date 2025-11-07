@@ -1,0 +1,9 @@
+[project]
+name = "java-to-java-compiler"
+version = "0.0.0"
+description = "Compilador Java→Java en Python"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -1,0 +1,1 @@
+"""Opciones de compilación (stub)."""

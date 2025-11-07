@@ -1,0 +1,1 @@
+"""Paquete compiler (núcleo del compilador)."""
