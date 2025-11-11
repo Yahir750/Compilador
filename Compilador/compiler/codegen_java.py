@@ -4,8 +4,8 @@ from typing import List, Tuple, Union
 from compiler.diagnostics import Diagnostic
 from compiler.ast_nodes import (
     CompilationUnit, ClassDecl, MethodDecl, Block, VarDecl, ExprStmt, If, While, For,
-    Assign, Binary, Unary, Call, Select, Ident, Literal as LiteralExpr, Expr, Stmt,
-    TypeRef, Param
+    Return, Break, Continue, Assign, Binary, Unary, Call, Select, Ident, Literal as LiteralExpr,
+    NewArray, ArrayAccess, Expr, Stmt, TypeRef, Param
 )
 from compiler.ir import IRProgram
 
@@ -119,6 +119,18 @@ class _EmitJavaAST:
             self.out.indent -= 1
             self.out.writeln("}")
             return
+        if isinstance(s, Return):
+            if s.value is None:
+                self.out.writeln("return;")
+            else:
+                self.out.writeln(f"return {self._expr(s.value)};")
+            return
+        if isinstance(s, Break):
+            self.out.writeln("break;")
+            return
+        if isinstance(s, Continue):
+            self.out.writeln("continue;")
+            return
         self.out.writeln("{ /* unsupported statement */ }")
 
     def _for_init_str(self, inits: tuple[Stmt, ...]) -> str:
@@ -171,6 +183,21 @@ class _EmitJavaAST:
             callee = self._expr(e.callee)
             args = ", ".join(self._expr(a) for a in e.args)
             return f"{callee}({args})"
+
+        if isinstance(e, NewArray):
+            elem_type = self._type_to_java(e.element_type)
+            if e.size is not None:
+                # new int[10]
+                return f"new {elem_type}[{self._expr(e.size)}]"
+            elif e.initializer is not None:
+                # new int[]{1,2,3}
+                elems = ", ".join(self._expr(elem) for elem in e.initializer)
+                return f"new {elem_type}[]{{{elems}}}"
+            return f"new {elem_type}[0]"
+
+        if isinstance(e, ArrayAccess):
+            # arr[index]
+            return f"{self._expr(e.array)}[{self._expr(e.index)}]"
 
         return "/* unsupported expr */"
 

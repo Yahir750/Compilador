@@ -5,7 +5,7 @@ from utils.tokens import Token, TokenKind
 
 KEYWORDS: Dict[str, TokenKind] = {
     "class": "CLASS",
-    "public": "PUBLIC",        # ✅ <-- AÑADE ESTA LÍNEA
+    "public": "PUBLIC",
     "static": "STATIC",
     "void": "VOID",
     "int": "INT_T",
@@ -16,6 +16,10 @@ KEYWORDS: Dict[str, TokenKind] = {
     "else": "ELSE",
     "while": "WHILE",
     "for": "FOR",
+    "return": "RETURN",
+    "break": "BREAK",
+    "continue": "CONTINUE",
+    "new": "NEW",
     "true": "TRUE",
     "false": "FALSE",
 }

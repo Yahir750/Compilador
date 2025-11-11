@@ -1,6 +1,6 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List, Tuple, Any
 from compiler.ast_nodes import TypeRef, Span
 
 @dataclass(frozen=True)
@@ -9,6 +9,7 @@ class Symbol:
     type: TypeRef
     span: Span
     kind: str  # "var" | "param" | "method" | "class"
+    metadata: Optional[Dict[str, Any]] = None  # Para métodos: {'params': [(TypeRef, name), ...], 'arity': int}
 
 class SymbolTable:
     """

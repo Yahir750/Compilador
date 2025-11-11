@@ -107,11 +107,11 @@ class Parser:
                 "STRING_T": "String", "VOID": "void"
             }
             base = mapping[t.kind]
-            # Soporte para arreglos tipo String[] o int[]
-            if self.peek().kind == "LBRACK":
+            # Soporte para arreglos: int[], int[][], etc.
+            while self.peek().kind == "LBRACK":
                 self.i += 1
                 self.expect("RBRACK", "']'")
-                return TypeRef(base + "[]")
+                base += "[]"
             return TypeRef(base)
 
         self.diags.append(Diagnostic(
@@ -146,6 +146,10 @@ class Parser:
             return self.for_stmt()
         if k == "RETURN":
             return self.return_stmt()
+        if k == "BREAK":
+            return self.break_stmt()
+        if k == "CONTINUE":
+            return self.continue_stmt()
         if k == "LBRACE":
             return self.block()
         # Expresión seguida de ';'
@@ -235,6 +239,16 @@ class Parser:
         self.expect("SEMI", "';'")
         return Return(expr, _span_of(tok))
 
+    def break_stmt(self) -> Break:
+        tok = self.expect("BREAK", "'break'")
+        self.expect("SEMI", "';'")
+        return Break(_span_of(tok))
+
+    def continue_stmt(self) -> Continue:
+        tok = self.expect("CONTINUE", "'continue'")
+        self.expect("SEMI", "';'")
+        return Continue(_span_of(tok))
+
     # ---------- Expresiones ----------
     def expr(self) -> Expr:
         return self.assign()
@@ -317,6 +331,12 @@ class Parser:
                 rparen = self.expect("RPAREN", "')'")
                 e = Call(e, tuple(args), Span(e.span.line, e.span.col, rparen.end_line, rparen.end_col))
                 continue
+            if self.match("LBRACK"):
+                # Acceso a array: arr[index]
+                index = self.expr()
+                rbrack = self.expect("RBRACK", "']'")
+                e = ArrayAccess(e, index, Span(e.span.line, e.span.col, rbrack.end_line, rbrack.end_col))
+                continue
             break
         return e
 
@@ -345,11 +365,54 @@ class Parser:
             inner = self.expr()
             self.expect("RPAREN", "')'")
             return inner
+        if tok.kind == "NEW":
+            return self.new_expr()
 
         self.i += 1
         self.diags.append(Diagnostic("error", "parser", "Expresión inválida",
                                      tok.line, tok.col, tok.end_line, tok.end_col, "PAR003"))
         return Literal(0, TypeRef("int"), _span_of(tok))
+
+    def new_expr(self) -> NewArray:
+        """Parsea: new int[10] o new int[]{1,2,3}"""
+        start_tok = self.expect("NEW", "'new'")
+        
+        # Parsear el tipo base SIN los corchetes
+        base_tok = self.peek()
+        if base_tok.kind not in {"INT_T", "DOUBLE_T", "BOOLEAN_T", "STRING_T"}:
+            self.diags.append(Diagnostic("error", "parser", "Tipo esperado después de 'new'",
+                                        base_tok.line, base_tok.col, base_tok.end_line, base_tok.end_col, "PAR002"))
+            return NewArray(TypeRef("int"), Literal(0, TypeRef("int"), _span_of(base_tok)), None, _span_of(start_tok))
+        
+        self.i += 1
+        mapping = {"INT_T": "int", "DOUBLE_T": "double", "BOOLEAN_T": "boolean", "STRING_T": "String"}
+        base_kind = mapping[base_tok.kind]
+        base_type = TypeRef(base_kind)
+        
+        self.expect("LBRACK", "'['")
+        
+        # new int[size] vs new int[]{...}
+        if self.peek().kind == "RBRACK":
+            # new int[]{...}
+            self.expect("RBRACK", "']'")
+            self.expect("LBRACE", "'{'")
+            
+            initializer: List[Expr] = []
+            if self.peek().kind != "RBRACE":
+                initializer.append(self.expr())
+                while self.match("COMMA"):
+                    initializer.append(self.expr())
+            
+            rbrace = self.expect("RBRACE", "'}'")
+            return NewArray(base_type, None, tuple(initializer), 
+                           Span(start_tok.line, start_tok.col, rbrace.end_line, rbrace.end_col))
+        else:
+            # new int[size]
+            size = self.expr()
+            rbrack = self.expect("RBRACK", "']'")
+            return NewArray(base_type, size, None,
+                           Span(start_tok.line, start_tok.col, rbrack.end_line, rbrack.end_col))
+
 
 # ---------- API pública ----------
 def parse(tokens: List[Token]) -> Tuple[CompilationUnit, List[Diagnostic]]:

@@ -10,7 +10,10 @@ class Span:
     end_line: int
     end_col: int
 
-TypeKind = Literal["int","double","boolean","String","void"]
+# Tipos base: "int", "double", "boolean", "String", "void"
+# Tipos array: "int[]", "double[]", "boolean[]", "String[]"
+# Tipos multidimensionales: "int[][]", etc.
+TypeKind = str  # Cambio de Literal a str para soportar arrays
 
 @dataclass(frozen=True)
 class TypeRef:
@@ -85,6 +88,19 @@ class For(Stmt):
     body: Stmt
     span: Span
 
+@dataclass(frozen=True)
+class Return(Stmt):
+    value: Optional[Expr]
+    span: Span
+
+@dataclass(frozen=True)
+class Break(Stmt):
+    span: Span
+
+@dataclass(frozen=True)
+class Continue(Stmt):
+    span: Span
+
 # ---------- Expresiones ----------
 @dataclass(frozen=True)
 class Assign(Expr):
@@ -126,4 +142,19 @@ class Ident(Expr):
 class Literal(Expr):
     value: object
     type: TypeRef
+    span: Span
+
+@dataclass(frozen=True)
+class NewArray(Expr):
+    """new int[size] o new int[]{1,2,3}"""
+    element_type: TypeRef  # tipo del elemento (sin [])
+    size: Optional[Expr]   # tamaño si es new int[10], None si es inicializador
+    initializer: Optional[Tuple[Expr, ...]]  # elementos si es new int[]{1,2,3}
+    span: Span
+
+@dataclass(frozen=True)
+class ArrayAccess(Expr):
+    """arr[index]"""
+    array: Expr
+    index: Expr
     span: Span

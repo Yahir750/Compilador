@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Literal as TypingLiteral
 from compiler.ast_nodes import (
     CompilationUnit, ClassDecl, MethodDecl, Block, VarDecl, ExprStmt, If, While, For,
-    Assign, Binary, Unary, Call, Select, Ident, Literal as LiteralExpr, Expr, Stmt, TypeRef, Span
+    Return, Break, Continue, Assign, Binary, Unary, Call, Select, Ident, Literal as LiteralExpr,
+    NewArray, ArrayAccess, Expr, Stmt, TypeRef, Span
 )
 from compiler.diagnostics import Diagnostic
 
@@ -210,6 +211,9 @@ class Lowerer:
             l_body = self.new_label("while_body_")
             l_end = self.new_label("while_end_")
 
+            # Push loop context (continue va a test, break va a end)
+            self.loop_stack.append({'continue': l_test, 'break': l_end})
+
             self.emit(JUMP(target=l_test))
             self.start_block(l_test)
             cond_val = self.lower_cond_as_temp(s.cond)
@@ -220,6 +224,9 @@ class Lowerer:
             self.emit(JUMP(target=l_test))
 
             self.start_block(l_end)
+            
+            # Pop loop context
+            self.loop_stack.pop()
             return
 
         if isinstance(s, For):
@@ -230,6 +237,9 @@ class Lowerer:
             l_body = self.new_label("for_body_")
             l_step = self.new_label("for_step_")
             l_end = self.new_label("for_end_")
+
+            # Push loop context (continue va a step, break va a end)
+            self.loop_stack.append({'continue': l_step, 'break': l_end})
 
             self.emit(JUMP(target=l_test))
 
@@ -250,6 +260,35 @@ class Lowerer:
             self.emit(JUMP(target=l_test))
 
             self.start_block(l_end)
+            
+            # Pop loop context
+            self.loop_stack.pop()
+            return
+
+        if isinstance(s, Return):
+            if s.value is None:
+                self.emit(RET(value=None, span=s.span))
+            else:
+                ret_val = self.lower_expr(s.value)
+                self.emit(RET(value=ret_val, span=s.span))
+            return
+
+        if isinstance(s, Break):
+            if self.loop_stack:
+                target = self.loop_stack[-1]['break']
+                self.emit(JUMP(target=target, span=s.span))
+            else:
+                self.diags.append(Diagnostic("error","ir","break fuera de loop",
+                                            s.span.line,s.span.col,s.span.end_line,s.span.end_col,"IR_BREAK"))
+            return
+
+        if isinstance(s, Continue):
+            if self.loop_stack:
+                target = self.loop_stack[-1]['continue']
+                self.emit(JUMP(target=target, span=s.span))
+            else:
+                self.diags.append(Diagnostic("error","ir","continue fuera de loop",
+                                            s.span.line,s.span.col,s.span.end_line,s.span.end_col,"IR_CONTINUE"))
             return
 
         return
@@ -270,6 +309,13 @@ class Lowerer:
             if isinstance(e.target, Ident):
                 self.emit(MOVE(dst=e.target.name, src=rhs, span=e.span))
                 return e.target.name
+            elif isinstance(e.target, ArrayAccess):
+                # arr[idx] = value
+                arr_val = self.lower_expr(e.target.array)
+                idx_val = self.lower_expr(e.target.index)
+                # Simplificado: emitimos MOVE con destino descriptivo
+                self.emit(MOVE(dst=f"{arr_val}[{idx_val}]", src=rhs, span=e.span))
+                return rhs
             else:
                 t = self.new_temp()
                 self.emit(MOVE(dst=t, src=rhs, span=e.span))
@@ -320,17 +366,64 @@ class Lowerer:
             return t
 
         if isinstance(e, Call):
-            callee_name = self._as_str(self.lower_expr(e.callee))
-            args_vals = tuple(self.lower_expr(a) for a in e.args)
-            if callee_name.endswith("System.out.println"):
-                self.emit(CALL(dst=None, name="println", args=args_vals, span=e.span))
+            # Determinar el nombre del método
+            method_name = None
+            
+            # System.out.println(...)
+            if isinstance(e.callee, Select):
+                callee_str = self._as_str(self.lower_expr(e.callee))
+                if callee_str.endswith("System.out.println"):
+                    method_name = "println"
+            # Llamada simple: metodo(args)
+            elif isinstance(e.callee, Ident):
+                method_name = e.callee.name
+            
+            if method_name:
+                args_vals = tuple(self.lower_expr(a) for a in e.args)
+                
+                # Para métodos que retornan valor, guardamos en temporal
+                # Para void (como println), dst=None pero necesitamos un valor de retorno dummy
                 t = self.new_temp()
-                self.emit(MOVE(dst=t, src="#0", span=e.span))
+                self.emit(CALL(dst=t if method_name != "println" else None, 
+                              name=method_name, 
+                              args=args_vals, 
+                              span=e.span))
+                
+                # Si es println (void), retornamos un dummy
+                if method_name == "println":
+                    self.emit(MOVE(dst=t, src="#0", span=e.span))
+                
                 return t
-            self.diags.append(Diagnostic("error","ir","Llamada no soportada en v1",
+            
+            # Llamada no soportada
+            self.diags.append(Diagnostic("error","ir","Llamada no soportada",
                                          e.span.line,e.span.col,e.span.end_line,e.span.end_col,"IR_CALL"))
             t = self.new_temp()
             self.emit(MOVE(dst=t, src="#0", span=e.span))
+            return t
+
+        if isinstance(e, NewArray):
+            # new int[size] o new int[]{...}
+            # Por ahora, simplificamos: retornamos un temporal que representa el array
+            # En un IR más completo, tendríamos instrucciones NEWARRAY
+            t = self.new_temp()
+            if e.size is not None:
+                size_val = self.lower_expr(e.size)
+                # Comentario en IR para documentar
+                self.emit(MOVE(dst=t, src=f"newarray_{e.element_type.kind}_{size_val}", span=e.span))
+            elif e.initializer is not None:
+                # new int[]{1,2,3}
+                init_vals = [self.lower_expr(elem) for elem in e.initializer]
+                self.emit(MOVE(dst=t, src=f"arrayinit_{len(init_vals)}", span=e.span))
+            return t
+
+        if isinstance(e, ArrayAccess):
+            # arr[index]
+            arr_val = self.lower_expr(e.array)
+            idx_val = self.lower_expr(e.index)
+            t = self.new_temp()
+            # Simplificado: guardar como string descriptivo
+            self.emit(MOVE(dst=t, src=f"{arr_val}[{idx_val}]", span=e.span))
             return t
 
         t = self.new_temp()

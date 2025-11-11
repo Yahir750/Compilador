@@ -13,16 +13,23 @@ def format_java(java_src: str) -> Tuple[str, List[Diagnostic]]:
     src = java_src.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     # Espacios consistentes alrededor de operadores
-    # (solo los más comunes; evita los de cadenas o comentarios)
-    src = re.sub(r"(?<!\w)=(?![=>])", " = ", src)
-    src = re.sub(r"(?<![=!<>])==(?!=)", " == ", src)
-    src = re.sub(r"(?<![=!<>])!=(?!=)", " != ", src)
+    # Importante: procesar operadores compuestos ANTES que los simples
+    src = re.sub(r"<=", " <= ", src)  # primero <= y >= completos
+    src = re.sub(r">=", " >= ", src)
+    src = re.sub(r"==", " == ", src)
+    src = re.sub(r"!=", " != ", src)
+    src = re.sub(r"&&", " && ", src)
+    src = re.sub(r"\|\|", " || ", src)
+    
+    # Luego operadores simples (solo si no son parte de compuestos)
+    src = re.sub(r"(?<![=!<>+\-*/%])=(?![=>])", " = ", src)
+    src = re.sub(r"(?<![<])(<)(?![<=])", r" \1 ", src)  # < solo
+    src = re.sub(r"(?<![>])(>)(?![>=])", r" \1 ", src)  # > solo
     src = re.sub(r"(?<!\w)\+(?!\+|\=)", " + ", src)
     src = re.sub(r"(?<!\w)\-(?!\-|\=)", " - ", src)
     src = re.sub(r"(?<!\w)\*(?!\=)", " * ", src)
     src = re.sub(r"(?<!\w)/(?!\=)", " / ", src)
-    src = re.sub(r"(?<!\w)<(?!<|=)", " < ", src)
-    src = re.sub(r"(?<!\w)>(?!>|=)", " > ", src)
+    
     src = re.sub(r"\s+", " ", src)  # colapsa múltiples espacios intermedios
     src = re.sub(r"\s*([;,\(\)\{\}])\s*", r"\1", src)  # limpia espacios dentro de paréntesis y llaves
 

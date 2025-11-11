@@ -25,6 +25,8 @@ class SemAnalyzer:
     def __init__(self):
         self.diags: List[Diagnostic] = []
         self.symtab = SymbolTable()
+        self.current_return_type: Optional[TypeRef] = None  # Tipo de retorno del método actual
+        self.loop_depth: int = 0  # Contador de loops anidados (para validar break/continue)
 
     def analyze(self, cu: CompilationUnit) -> Tuple[CompilationUnit, List[Diagnostic], SymbolTable]:
         # nivel clase
@@ -34,8 +36,13 @@ class SemAnalyzer:
 
         self.symtab.enter()  # ámbito clase
         for m in cls.methods:
-            # Declaración de método (solo nombre + tipo)
-            ok = self.symtab.define(Symbol(m.name, m.return_type, m.span, "method"))
+            # Declaración de método con información de parámetros
+            param_types = [(p.type, p.name) for p in m.params]
+            metadata = {
+                'params': param_types,
+                'arity': len(m.params)
+            }
+            ok = self.symtab.define(Symbol(m.name, m.return_type, m.span, "method", metadata))
             if not ok:
                 self._error(m.span, "SEM_REDEF", f"Método redefinido: {m.name}", stage="semantics")
 
@@ -52,6 +59,9 @@ class SemAnalyzer:
     def _check_method(self, m: MethodDecl):
         # nuevo ámbito método
         self.symtab.enter()
+        
+        # Guardar el tipo de retorno actual
+        self.current_return_type = m.return_type
 
         # parámetros
         for p in m.params:
@@ -60,6 +70,9 @@ class SemAnalyzer:
 
         # cuerpo
         self._check_stmt(m.body)
+        
+        # Restaurar
+        self.current_return_type = None
 
         # warnings: parámetros no usados
         scope, usage = self.symtab.exit()
@@ -109,7 +122,9 @@ class SemAnalyzer:
             ct = self._check_expr(s.cond)
             if ct.kind != "boolean":
                 self._error(s.span, "SEM_COND", "La condición de while debe ser boolean", "semantics")
+            self.loop_depth += 1
             self._check_stmt(s.body)
+            self.loop_depth -= 1
 
         elif isinstance(s, For):
             # init son Stmt (var decl o expr;)
@@ -121,7 +136,43 @@ class SemAnalyzer:
                     self._error(s.span, "SEM_COND", "La condición de for debe ser boolean", "semantics")
             for e in s.step:
                 self._check_expr(e)
+            self.loop_depth += 1
             self._check_stmt(s.body)
+            self.loop_depth -= 1
+
+        elif isinstance(s, Return):
+            # Validar que estemos en un método
+            if self.current_return_type is None:
+                self._error(s.span, "SEM_RETURN", "Return fuera de método", "semantics")
+                return
+            
+            # Validar el tipo de retorno
+            if s.value is None:
+                # return sin valor
+                if self.current_return_type.kind != "void":
+                    self._error(s.span, "SEM_RETURN", 
+                               f"Método de tipo {self.current_return_type.kind} debe retornar un valor", 
+                               "semantics")
+            else:
+                # return con valor
+                if self.current_return_type.kind == "void":
+                    self._error(s.span, "SEM_RETURN", 
+                               "Método void no debe retornar un valor", 
+                               "semantics")
+                else:
+                    ret_type = self._check_expr(s.value)
+                    if not can_assign(self.current_return_type.kind, ret_type.kind):
+                        self._error(s.span, "SEM_RETURN", 
+                                   f"No se puede retornar {ret_type.kind} en método de tipo {self.current_return_type.kind}", 
+                                   "semantics")
+
+        elif isinstance(s, Break):
+            if self.loop_depth == 0:
+                self._error(s.span, "SEM_BREAK", "break fuera de un loop", "semantics")
+
+        elif isinstance(s, Continue):
+            if self.loop_depth == 0:
+                self._error(s.span, "SEM_CONTINUE", "continue fuera de un loop", "semantics")
 
         else:
             # otros nodos no contemplados en v1
@@ -144,9 +195,9 @@ class SemAnalyzer:
         if isinstance(e, Assign):
             lt = self._check_expr(e.target)
             rt = self._check_expr(e.value)
-            # por simplicidad en v1, solo permitimos asignar a Ident
-            if not isinstance(e.target, Ident):
-                self._error(e.span, "SEM_LVALUE", "Lado izquierdo de asignación debe ser un identificador", "semantics")
+            # Permitimos asignar a Ident o ArrayAccess
+            if not isinstance(e.target, (Ident, ArrayAccess)):
+                self._error(e.span, "SEM_LVALUE", "Lado izquierdo de asignación debe ser una variable o acceso a array", "semantics")
             if not can_assign(lt.kind, rt.kind):
                 self._error(e.span, "SEM_ASSIGN", f"No se puede asignar {rt.kind} a {lt.kind}", "semantics")
             return lt
@@ -210,9 +261,89 @@ class SemAnalyzer:
                 else:
                     self._check_expr(e.args[0])  # acepta cualquier tipo soportado
                 return TypeRef("void")
-            # otros llamados (no soportados en v1)
-            self._error(e.span, "SEM_CALL", "Llamadas a métodos generales no soportadas en v1", "semantics")
+            
+            # Llamadas a métodos propios (simple: nombre(args))
+            if isinstance(e.callee, Ident):
+                method_name = e.callee.name
+                method_sym = self.symtab.resolve(method_name)
+                
+                if method_sym is None:
+                    self._error(e.span, "SEM_UNDECL", f"Método no declarado: {method_name}", "semantics")
+                    return TypeRef("void")
+                
+                if method_sym.kind != "method":
+                    self._error(e.span, "SEM_CALL", f"{method_name} no es un método", "semantics")
+                    return TypeRef("void")
+                
+                # Marcar uso del método
+                self.symtab.mark_used(method_name)
+                
+                # Validar aridad
+                if method_sym.metadata:
+                    expected_arity = method_sym.metadata.get('arity', 0)
+                    actual_arity = len(e.args)
+                    
+                    if expected_arity != actual_arity:
+                        self._error(e.span, "SEM_ARGC", 
+                                   f"Método {method_name} espera {expected_arity} argumento(s), recibió {actual_arity}", 
+                                   "semantics")
+                    
+                    # Validar tipos de argumentos
+                    param_types = method_sym.metadata.get('params', [])
+                    for i, arg in enumerate(e.args):
+                        arg_type = self._check_expr(arg)
+                        if i < len(param_types):
+                            expected_type = param_types[i][0]  # (TypeRef, name)
+                            if not can_assign(expected_type.kind, arg_type.kind):
+                                self._error(e.span, "SEM_ARGTYPE", 
+                                           f"Argumento {i+1} de {method_name}: esperado {expected_type.kind}, recibido {arg_type.kind}", 
+                                           "semantics")
+                else:
+                    # Sin metadata, solo chequeamos las expresiones
+                    for arg in e.args:
+                        self._check_expr(arg)
+                
+                return method_sym.type
+            
+            # otros llamados (no soportados)
+            self._error(e.span, "SEM_CALL", "Llamadas a métodos complejos no soportadas", "semantics")
             return TypeRef("void")
+
+        if isinstance(e, NewArray):
+            # new int[size] o new int[]{...}
+            if e.size is not None:
+                # new int[size]
+                size_type = self._check_expr(e.size)
+                if size_type.kind != "int":
+                    self._error(e.span, "SEM_ARRAY", "Tamaño de array debe ser int", "semantics")
+            elif e.initializer is not None:
+                # new int[]{1,2,3}
+                for elem in e.initializer:
+                    elem_type = self._check_expr(elem)
+                    if not can_assign(e.element_type.kind, elem_type.kind):
+                        self._error(e.span, "SEM_ARRAY", 
+                                   f"Elemento de tipo {elem_type.kind} no compatible con array de {e.element_type.kind}", 
+                                   "semantics")
+            # Retorna tipo array
+            return TypeRef(e.element_type.kind + "[]")
+
+        if isinstance(e, ArrayAccess):
+            # arr[index]
+            array_type = self._check_expr(e.array)
+            index_type = self._check_expr(e.index)
+            
+            # Validar que el índice sea int
+            if index_type.kind != "int":
+                self._error(e.span, "SEM_ARRAY", "Índice de array debe ser int", "semantics")
+            
+            # Validar que sea un array
+            if not array_type.kind.endswith("[]"):
+                self._error(e.span, "SEM_ARRAY", f"{array_type.kind} no es un array", "semantics")
+                return TypeRef("int")
+            
+            # Retorna tipo del elemento (quita un nivel de [])
+            elem_kind = array_type.kind[:-2]  # quita "[]"
+            return TypeRef(elem_kind)
 
         # fallback
         return TypeRef("int")
